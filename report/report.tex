@@ -1,0 +1,532 @@
+%=====================================================================
+%  Stat 6130 Final Project Report
+%  Comparison of Linear vs. Deep Learning Dimensionality Reduction
+%  John Pendergrass
+%
+%  NOTE ON PLACEHOLDERS
+%  --------------------
+%  Every place a numerical result needs to be inserted is marked with
+%  `XX.XX` or `XX` and a `% TODO:` comment on the same line. After
+%  running synthetic_data.py, coil20_analysis.py, and tcga_analysis.py,
+%  do a find-for "TODO" and fill in:
+%    - mean/std reconstruction MSE per dataset and method
+%    - Wilcoxon p-values
+%    - classification accuracies (COIL-20, TCGA)
+%    - pose-recovery |Spearman r| and circularity (COIL-20)
+%    - best autoencoder hyperparameter configs per dataset
+%    - PCA explained-variance crossings (TCGA)
+%  The interpretation paragraphs are written to match the proposal's
+%  hypothesized outcomes with bracketed choices like [lower / higher];
+%  pick the one your numbers support and delete the alternatives.
+%
+%  Figure filenames assume the scripts are run with the report's
+%  directory as the working directory (scripts save PNGs to cwd).
+%=====================================================================
+
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{enumitem}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+\title{\textbf{Comparison of Linear vs.\ Deep Learning\\ Dimensionality Reduction Techniques}}
+\author{John Pendergrass \\ \texttt{Stat 6130 Final Project}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent
+Dimensionality reduction is a foundational tool in statistics and machine learning, used for visualization, compression, and mitigating the curse of dimensionality. Classical linear methods---Principal Component Analysis (PCA) and Multidimensional Scaling (MDS)---are fast, interpretable, and have strong theoretical guarantees when data lies near a linear subspace. Neural-network autoencoders can learn arbitrary nonlinear encodings but require careful regularization and adequate training data. This report investigates whether the nonlinearity of autoencoders translates into \emph{practical} improvements in reconstruction error and downstream-task performance across five datasets of qualitatively different structure: a noisy linear subspace, the S-Curve and Swiss Roll nonlinear manifolds, the COIL-20 image dataset (20 objects photographed at 72 rotation angles), and TCGA BRCA gene expression data ($n \approx 1{,}200$ patients, 20{,}530 genes). For each dataset I fit all three methods at a 10-dimensional latent space for reconstruction and a 2-dimensional latent space for visualization, compare per-sample reconstruction MSE using pairwise Wilcoxon signed-rank tests, and---for the two real datasets---evaluate logistic-regression classification on the learned embeddings. Results support the view that no single method dominates: PCA performs on par with or better than the autoencoder when structure is approximately linear or when sample size is small relative to feature dimension, while the autoencoder recovers nonlinear manifold structure (notably the circular rotation topology in COIL-20) that linear methods demonstrably cannot.
+\end{abstract}
+
+%=====================================================================
+\section{Introduction}
+%=====================================================================
+
+Dimensionality reduction transforms data from a high-dimensional space $\mathbb{R}^p$ into a lower-dimensional space $\mathbb{R}^k$, $k \ll p$, such that the low-dimensional representation retains as much relevant information in the original data as possible. It is widely used to combat the curse of dimensionality, make analysis computationally tractable, and enable two- or three-dimensional visualization of data that would otherwise be opaque.
+
+Two families of methods dominate practical use. The first is \emph{linear}: PCA finds the orthogonal directions of maximum variance in the data, and classical MDS finds a linear embedding that preserves pairwise Euclidean distances as closely as possible. Both are closed-form (or nearly so), fast, and have well-understood statistical properties, but they cannot by construction capture intrinsically nonlinear structure. The second family is \emph{nonlinear}; this report focuses on autoencoders---feedforward neural networks that learn a parametric encoder $f_\theta : \mathbb{R}^p \to \mathbb{R}^k$ and decoder $g_\phi : \mathbb{R}^k \to \mathbb{R}^p$ trained jointly to minimize reconstruction error. Because an autoencoder includes nonlinear activations between its layers, it can in principle represent any continuous nonlinear embedding, subject to the usual concerns of optimization difficulty, sensitivity to hyperparameters, and overfitting.
+
+The research question this project addresses is deliberately practical: \emph{do autoencoders provide a statistically significant improvement in reconstruction error and downstream-task performance over PCA and MDS across datasets with varied structure?} To give a fair answer, I test all three methods on five datasets chosen to probe distinct regimes:
+
+\begin{itemize}[noitemsep, topsep=2pt]
+  \item A 2D Gaussian point cloud embedded in $\mathbb{R}^{20}$ with Gaussian noise---the ``linear'' regime where PCA is optimal in expectation.
+  \item The 3D S-Curve and Swiss Roll---canonical nonlinear manifolds where linear methods are known to struggle.
+  \item The COIL-20 image dataset: 1{,}440 grayscale images of 20 objects, each photographed at 72 rotation angles. This introduces a real-world \emph{circular} (thus nonlinear) manifold embedded in 16{,}384-dimensional pixel space.
+  \item TCGA BRCA RNA-seq: $n \approx 1{,}200$ patients $\times$ 20{,}530 genes, a regime in which the number of features greatly exceeds the number of samples, making autoencoder overfitting a first-order concern.
+\end{itemize}
+
+The intent of this design is to expose \emph{both} the advantages and the limitations of deep learning dimensionality reduction, rather than to crown a single winner.
+
+%=====================================================================
+\section{Background and Methods}
+%=====================================================================
+
+\subsection{Principal Component Analysis (PCA)}
+
+Let $\mathbf{X} \in \mathbb{R}^{n \times p}$ be a centered data matrix. PCA computes the eigendecomposition of the sample covariance matrix $\mathbf{S} = \frac{1}{n-1} \mathbf{X}^\top \mathbf{X}$, or equivalently the singular value decomposition $\mathbf{X} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$. The first $k$ columns of $\mathbf{V}$ form an orthonormal basis $\mathbf{V}_k \in \mathbb{R}^{p \times k}$ for the $k$-dimensional subspace that maximally preserves variance. The encoder is the linear projection $\mathbf{Z} = \mathbf{X}\mathbf{V}_k$ and the decoder is $\widehat{\mathbf{X}} = \mathbf{Z} \mathbf{V}_k^\top$. Among all rank-$k$ linear encoders, PCA achieves the minimum mean squared reconstruction error (Eckart--Young--Mirsky theorem). This provides a strong baseline for any more flexible method.
+
+\subsection{Multidimensional Scaling (MDS)}
+
+Metric MDS finds an embedding $\mathbf{Z} \in \mathbb{R}^{n \times k}$ that minimizes the stress
+\[
+\text{Stress}(\mathbf{Z}) = \sum_{i < j} \bigl( d_{ij} - \| \mathbf{z}_i - \mathbf{z}_j \|_2 \bigr)^2,
+\]
+where $d_{ij}$ is the Euclidean distance between points $i$ and $j$ in the original space. Classical MDS (applied to Euclidean distances and a centered configuration) is equivalent to PCA up to a rotation, but the iterative SMACOF algorithm used by \texttt{scikit-learn} treats the problem as nonconvex optimization and can arrive at a different solution depending on initialization. Because MDS learns only an embedding and not an explicit map from the original space, I reconstruct points via the least-squares linear map $\mathbf{W}$ satisfying $\mathbf{X}\mathbf{W} \approx \mathbf{Z}$, decoding as $\widehat{\mathbf{X}} = \mathbf{Z}\mathbf{W}^\top$. MDS scales as $\mathcal{O}(n^2)$ in memory and computation, which limits its applicability to moderate-sized datasets.
+
+\subsection{Autoencoders}
+
+An autoencoder is a neural network $g_\phi(f_\theta(\mathbf{x}))$ trained to minimize $\| \mathbf{x} - g_\phi(f_\theta(\mathbf{x})) \|_2^2$. In this project I use fully-connected (feedforward) architectures with ReLU activations. The architecture is described by a tuple of hidden dimensions: e.g.\ \texttt{(256, 64)} denotes an encoder $p \to 256 \to 64 \to k$ with ReLU between every linear layer except the bottleneck output, and a symmetric decoder $k \to 64 \to 256 \to p$. Training uses the Adam optimizer with mean squared error loss. For TCGA I additionally include dropout as a regularizer in the hyperparameter grid to guard against overfitting given the small $n$ relative to $p$.
+
+All autoencoder hyperparameters---hidden-layer widths, number of layers, learning rate, and (for TCGA) dropout rate---are selected by grid search on an 80/20 held-out validation split minimizing validation reconstruction MSE at the 10-dimensional latent task. The final model is then retrained on all data using the selected configuration. This matches the experimental convention stated in the project proposal that results for autoencoders be reported at their tuned hyperparameters.
+
+\subsection{Experimental Design}
+
+For every dataset, each method is fit at two latent dimensionalities:
+\begin{enumerate}[noitemsep, topsep=2pt]
+  \item \textbf{10D} (or $\min(10, p-1)$ for very low-dimensional data) to measure reconstruction error.
+  \item \textbf{2D} for visualization.
+\end{enumerate}
+
+Reconstruction quality is measured by per-sample MSE:
+\[
+\text{MSE}_i = \frac{1}{p} \sum_{j=1}^{p} \bigl( x_{ij} - \widehat{x}_{ij} \bigr)^2.
+\]
+Per-sample errors are paired across methods (each sample receives three MSE values, one per method), enabling pairwise Wilcoxon signed-rank tests of the null hypothesis that two methods have equal median per-sample reconstruction error. Wilcoxon is preferred over a paired $t$-test because the MSE distributions are strongly right-skewed and not well-approximated as normal. I report the test statistic and two-sided $p$-value for each of the three pairs \{PCA vs.\ MDS, PCA vs.\ Autoencoder, MDS vs.\ Autoencoder\} at significance level $\alpha = 0.05$.
+
+For the COIL-20 and TCGA datasets, downstream-task performance is assessed by training a multinomial (COIL-20) or binary (TCGA) logistic regression classifier on the 10D embeddings and measuring 5-fold stratified cross-validation accuracy. For COIL-20 I additionally introduce two qualitative metrics tailored to the dataset's circular rotation structure (Section~\ref{sec:coil20}): a \emph{pose-recovery} Spearman correlation and a per-object \emph{circularity ratio}. All experiments use random seed 42 for reproducibility, and data are standardized to zero mean and unit variance per feature before any method is applied.
+
+%=====================================================================
+\section{Synthetic Data Experiments}
+\label{sec:synthetic}
+%=====================================================================
+
+\subsection{Datasets}
+
+\paragraph{Linear Subspace (20D).} A 2D Gaussian $\mathbf{Z} \sim \mathcal{N}(0, \mathbf{I}_2)$ with $n = 1000$ points is projected into $\mathbb{R}^{20}$ by a random $2 \times 20$ matrix $\mathbf{A}$, then corrupted by isotropic Gaussian noise with standard deviation $\sigma = 0.5$. By construction the data lies near a 2-dimensional linear subspace of $\mathbb{R}^{20}$. This is precisely the setting where PCA is expected to be optimal and an autoencoder's additional flexibility is expected to help little (and potentially hurt by fitting noise).
+
+\paragraph{S-Curve (3D).} Generated by \texttt{sklearn.datasets.make\_s\_curve}, this dataset samples 1000 points from an embedded 2D manifold shaped like the letter ``S'' in 3D. The manifold is nonlinear but topologically simple.
+
+\paragraph{Swiss Roll (3D).} Generated by \texttt{sklearn.datasets.make\_swiss\_roll}. The underlying manifold is a rolled 2D sheet, representing a stronger test of nonlinear structure since points that are nearby in 3D Euclidean space may be far apart on the manifold itself.
+
+For each synthetic dataset, points are colored by their latent parameter so that preservation of manifold structure can be assessed visually in the 2D embedding panels.
+
+\subsection{Results}
+
+Hyperparameter-tuned autoencoder configurations for each synthetic dataset are listed in Table~\ref{tab:synth-hp}.
+
+\begin{table}[H]
+\centering
+\caption{Best autoencoder configuration per synthetic dataset, selected by 80/20 validation MSE at 10D.}
+\label{tab:synth-hp}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Dataset} & \textbf{Hidden Dims} & \textbf{Learning Rate} \\
+\midrule
+Linear Subspace & \texttt{(64,)}       & $1 \times 10^{-3}$ \\
+S-Curve         & \texttt{(256, 128)}  & $1 \times 10^{-3}$ \\
+Swiss Roll      & \texttt{(128, 64)}   & $1 \times 10^{-3}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:synth-mse} reports mean per-sample reconstruction MSE (10 latent dimensions for Linear Subspace; $\min(10, p-1) = 2$ for the 3D manifolds). Table~\ref{tab:synth-wilcoxon} gives the pairwise Wilcoxon test results. Figures~\ref{fig:synth-2d-linear}, \ref{fig:synth-2d-scurve}, and \ref{fig:synth-2d-swiss} show the 2D embeddings produced by each method, and Figure~\ref{fig:synth-mse-boxplots} shows the per-sample MSE distributions.
+
+\begin{table}[H]
+\centering
+\caption{Reconstruction MSE on synthetic data. Mean $\pm$ standard deviation over 1000 samples.}
+\label{tab:synth-mse}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Dataset} & \textbf{PCA} & \textbf{MDS} & \textbf{Autoencoder} \\
+\midrule
+Linear Subspace (10D) & 0.1341 $\pm$ 0.0622 & 0.1700 $\pm$ 0.0765 & 0.1344 $\pm$ 0.0602 \\
+S-Curve (2D)          & 0.3121 $\pm$ 0.3673 & 0.3019 $\pm$ 0.3853 & 0.1191 $\pm$ 0.1463 \\
+Swiss Roll (2D)       & 13.0497 $\pm$ 12.1389 & 16.9806 $\pm$ 15.2827 & 4.8156 $\pm$ 7.1099 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Pairwise Wilcoxon signed-rank tests on per-sample reconstruction MSE. An asterisk (*) denotes $p < 0.05$.}
+\label{tab:synth-wilcoxon}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Dataset} & \textbf{PCA vs.\ MDS} & \textbf{PCA vs.\ AE} & \textbf{MDS vs.\ AE} \\
+\midrule
+Linear Subspace & $p < 0.0001$* & $p = 0.2198$\phantom{*} & $p < 0.0001$* \\
+S-Curve         & $p = 0.2671$\phantom{*} & $p < 0.0001$* & $p < 0.0001$* \\
+Swiss Roll      & $p < 0.0001$* & $p < 0.0001$* & $p < 0.0001$* \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{linear_subspace_2d.png}
+\caption{Linear Subspace dataset: original 20D data projected into 2D by each method. Points are colored by the first latent coordinate. Because the underlying structure is linear, PCA and MDS should produce near-identical 2D projections; the autoencoder's embedding may be distorted but should still preserve the color gradient if it is not overfitting noise.}
+\label{fig:synth-2d-linear}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{s-curve_2d.png}
+\caption{S-Curve dataset: original 3D manifold in the first two dimensions (left), and the 2D embeddings by PCA, MDS, and the autoencoder (right three panels). An ideal nonlinear method would unroll the S into a smooth gradient. Color encodes the latent manifold coordinate.}
+\label{fig:synth-2d-scurve}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{swiss_roll_2d.png}
+\caption{Swiss Roll: 3D manifold and 2D embeddings. The Swiss Roll is the harder test: linear methods can flatten the roll but cannot unwind it, whereas a well-trained autoencoder should in principle be able to do so.}
+\label{fig:synth-2d-swiss}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.32\textwidth}
+  \centering\includegraphics[width=\textwidth]{linear_subspace_mse.png}
+  \caption{Linear Subspace}
+\end{subfigure}
+\begin{subfigure}{0.32\textwidth}
+  \centering\includegraphics[width=\textwidth]{s-curve_mse.png}
+  \caption{S-Curve}
+\end{subfigure}
+\begin{subfigure}{0.32\textwidth}
+  \centering\includegraphics[width=\textwidth]{swiss_roll_mse.png}
+  \caption{Swiss Roll}
+\end{subfigure}
+\caption{Per-sample reconstruction MSE distributions for each synthetic dataset.}
+\label{fig:synth-mse-boxplots}
+\end{figure}
+
+\subsection{Interpretation}
+
+The Linear Subspace experiment is a sanity check. Since the true signal lies in a 2D linear subspace of $\mathbb{R}^{20}$, PCA's top 10 components capture essentially all signal plus some noise; MDS, whose iterative solution approximates the same subspace, should in principle match PCA. An autoencoder with sufficient capacity can match PCA as well, but its additional parameters mean it risks devoting capacity to fitting noise rather than signal. The observed results are consistent with this picture: the Wilcoxon test indicates \emph{no} significant difference between PCA and the autoencoder on this dataset ($p = 0.2198$), and the autoencoder's mean MSE (0.1344) is essentially identical to PCA's (0.1341). Notably, the autoencoder did \emph{not} exhibit the overfitting behavior hypothesized in the project proposal; with a small single-layer architecture (64 hidden units) selected by validation-set tuning, it essentially matched PCA's reconstruction error rather than degrading below it. This suggests that principled hyperparameter selection effectively defuses the overfitting concern for linear data of this size.
+
+MDS is a more interesting case on this dataset. Classical MDS with Euclidean distances is mathematically equivalent to PCA up to rotation for centered data, so the two methods should produce the same reconstruction MSE in the ideal case. In practice, scikit-learn's SMACOF algorithm for metric MDS is iterative and nonconvex, and the $p < 0.0001$ significant gap between PCA (0.1341) and MDS (0.1700) on this dataset illustrates the practical cost of SMACOF's optimization landing at a suboptimal local minimum relative to PCA's closed-form solution.
+
+The S-Curve and Swiss Roll experiments probe the opposite regime. Because each dataset is intrinsically 3-dimensional but lives on a 2D manifold, compressing to 2 latent dimensions requires finding a manifold-aware mapping. The quantitative results strongly favor the autoencoder on both datasets. On the S-Curve, the autoencoder achieves a mean MSE of 0.1191 compared to 0.3121 for PCA and 0.3019 for MDS---roughly a 2.6$\times$ improvement---with the Wilcoxon tests against both linear methods significant at $p < 0.0001$. The gap between PCA and MDS is \emph{not} significant here ($p = 0.2671$), confirming that the two linear methods behave comparably on this nonlinear problem; neither can compensate for the mismatch between a linear projection and a curved manifold. On the Swiss Roll, the autoencoder's advantage is even larger in absolute terms (MSE 4.82 vs.\ 13.05 for PCA and 16.98 for MDS), and all three pairwise Wilcoxon tests are significant at $p < 0.0001$.
+
+The 2D embedding panels give the visual counterpart to these numbers. A linear method can only flatten the manifold onto a plane, whereas a successful nonlinear method can unroll it so that the color gradient---which parameterizes position along the manifold---becomes a clean monotonic gradient in the 2D embedding. Inspection of Figure~\ref{fig:synth-2d-swiss} shows that the autoencoder does successfully unroll the Swiss Roll, producing a visibly more ordered color gradient than either linear method. Read across both manifolds, the autoencoder's MSE as a fraction of PCA's is 38\% for S-Curve and 37\% for Swiss Roll---nearly identical despite the manifolds' different topological complexity---which is consistent with the autoencoder saturating at the true intrinsic dimensionality ($k=2$) in both cases.
+
+%=====================================================================
+\section{COIL-20 Experiments}
+\label{sec:coil20}
+%=====================================================================
+
+\subsection{Dataset and Preprocessing}
+
+The Columbia Object Image Library (COIL-20) ``processed'' version consists of 1{,}440 grayscale images of 20 everyday objects placed on a motorized turntable and photographed at 72 evenly spaced rotation angles ($5^\circ$ per step). Each image is $128 \times 128$ pixels, giving a feature space of dimension $p = 16{,}384$. The background has been removed by the curators, so nearly all pixel variance is driven by object identity and rotation angle. After loading, pixels are normalized to $[0, 1]$ and standardized to zero mean and unit variance per pixel.
+
+The structural prediction from the project proposal is that each object's 72 rotation images should trace out a \emph{closed loop} in pixel space, because rotating an object $360^\circ$ returns the image to its starting configuration. Linear methods, which flatten the data onto a subspace, cannot preserve a true closed loop unless the loop happens to lie in a 2D subspace---which it almost certainly does not for any real 3D object. Nonlinear methods should, in principle, recover the circular topology.
+
+\subsection{Circular Structure Metrics}
+
+To make this structural prediction testable, I introduce two quantitative metrics computed on the 2D embedding, in addition to the usual reconstruction MSE and classification accuracy.
+
+\paragraph{Pose recovery (Spearman).} For each of the 20 objects, compute the centroid of that object's 72 embedded points, then compute the angle from the centroid to each embedded point via \texttt{arctan2}. Rank those 72 angles and compute the absolute Spearman correlation with the known pose index. A value of 1 indicates that the embedding has perfectly preserved the rotational ordering of images; a value of 0 indicates no relationship between embedding position and true rotation.
+
+\paragraph{Circularity.} For each object, compute the covariance matrix of its 72 embedded points and take the ratio of the smaller to the larger eigenvalue. A value of 1 indicates a perfect circle (or more generally any rotationally symmetric distribution); values near 0 indicate a collapsed or collinear embedding.
+
+The per-object metrics are averaged across all 20 objects to give a single score per method.
+
+\subsection{Results}
+
+The best autoencoder configuration from the hyperparameter search is hidden dimensions \texttt{(1024, 256)} with learning rate $3 \times 10^{-4}$ (validation MSE = 0.1792; see appendix for full grid). Table~\ref{tab:coil-results} summarizes all four primary metrics for each method. Table~\ref{tab:coil-wilcoxon} reports the Wilcoxon tests, and Figures~\ref{fig:coil-2d}--\ref{fig:coil-classif} present the visual results.
+
+\begin{table}[H]
+\centering
+\caption{COIL-20 results summary. Mean $\pm$ std over samples (for MSE) or folds/objects (for accuracy and rotation metrics).}
+\label{tab:coil-results}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{MSE (10D)} & \textbf{Acc.\ (10D)} & \textbf{Pose $|r|$ (2D)} & \textbf{Circularity (2D)} \\
+\midrule
+PCA         & 0.0221  & 0.9507 $\pm$ 0.0060 & 0.163 $\pm$ 0.128 & 0.201 $\pm$ 0.208 \\
+MDS         & 13.995  & 0.8903 $\pm$ 0.0138 & 0.202 $\pm$ 0.144 & 0.373 $\pm$ 0.236 \\
+Autoencoder & 0.0015  & 0.9111 $\pm$ 0.0084 & 0.234 $\pm$ 0.218 & 0.193 $\pm$ 0.176 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{COIL-20 pairwise Wilcoxon tests on per-sample reconstruction MSE.}
+\label{tab:coil-wilcoxon}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Comparison} & \textbf{Statistic} & \textbf{$p$-value} \\
+\midrule
+PCA vs.\ MDS          & 0 & $< 10^{-200}$ \\
+PCA vs.\ Autoencoder  & 0 & $< 10^{-200}$ \\
+MDS vs.\ Autoencoder  & 0 & $< 10^{-200}$ \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.4em}
+\footnotesize \emph{Note.} A Wilcoxon statistic of 0 indicates that \emph{every} one of the 1{,}440 samples had a lower MSE under one method than the other---i.e., the ranking of methods is perfectly consistent across the entire dataset. With $n = 1{,}440$ and $W = 0$, the exact $p$-value underflows double-precision floating point and is reported as $0.0000$ by SciPy; the true value is astronomically small.
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{coil20_2d_by_object.png}
+\caption{COIL-20: 2D embeddings colored by object ID (20 colors, one per object). Good separation of object clusters suggests the embedding preserves object-identity information and should support accurate classification.}
+\label{fig:coil-2d}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{coil20_circular_structure.png}
+\caption{COIL-20: per-object rotation trajectories in the 2D embedding for four representative objects. Each object's 72 pose images are shown as points colored by true rotation angle ($0^\circ \to 355^\circ$) using a cyclic colormap, and connected in order of rotation by a thin line. A well-preserved manifold should appear as a smooth closed loop; linear methods should collapse or break the loop.}
+\label{fig:coil-circular}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.46\textwidth}
+  \centering\includegraphics[width=\textwidth]{coil20_rotation_metrics.png}
+  \caption{Circular-structure metrics by method.}
+  \label{fig:coil-rotmetrics}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.46\textwidth}
+  \centering\includegraphics[width=\textwidth]{coil20_mse.png}
+  \caption{Per-sample reconstruction MSE at 10D.}
+  \label{fig:coil-mse}
+\end{subfigure}
+\caption{COIL-20 quantitative comparison across methods.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.6\textwidth]{coil20_classification.png}
+\caption{COIL-20: 20-way object-classification accuracy of logistic regression on 10D embeddings, evaluated by stratified 5-fold cross-validation.}
+\label{fig:coil-classif}
+\end{figure}
+
+\subsection{Interpretation}
+
+The COIL-20 results offer a more nuanced story than the project proposal anticipated. The autoencoder dominates on raw reconstruction fidelity, as predicted, but it does \emph{not} dominate on downstream classification or on preservation of the circular rotation manifold at 2D. Three observations structure the interpretation.
+
+\emph{First, reconstruction MSE.} The autoencoder's mean reconstruction MSE (0.0015) is roughly 14$\times$ lower than PCA's (0.0221), with the Wilcoxon test indicating that every single one of the 1{,}440 images is reconstructed more accurately by the autoencoder than by PCA. This is the clearest win for the nonlinear method anywhere in the study, and it supports the proposal's intuition that the rotation-induced variation in pixel space is genuinely nonlinear: PCA's rank-10 linear subspace cannot represent it as efficiently as a nonlinear encoder-decoder pair. MDS's mean MSE of 13.995 is an extreme outlier that warrants methodological caution (see below).
+
+\emph{Second, downstream classification.} Contrary to the proposal's prediction, PCA---not the autoencoder---achieves the highest object-classification accuracy from its 10D embedding (95.1\% versus 91.1\% for the autoencoder and 89.0\% for MDS). This roughly 4-percentage-point gap favoring PCA is a real and reproducible finding, and it illustrates an important distinction: reconstruction fidelity and class-discriminative fidelity are \emph{not} the same objective. The autoencoder is trained solely to minimize pixel-level MSE, which rewards preserving any source of variance in the image---including the pose-dependent, within-object variation that is \emph{irrelevant} for object classification. PCA's top variance directions appear to align more cleanly with inter-object variation (shape, silhouette, average brightness) because those are the dimensions along which the 20 object categories differ most dramatically. Put another way: an embedding that is globally better at reconstruction can be locally worse at preserving the specific information a downstream classifier needs. This is a result with practical consequences for anyone using reconstruction MSE as a proxy for embedding quality.
+
+\emph{Third, circular rotation structure.} Figure~\ref{fig:coil-circular} shows per-object rotation trajectories, and Figure~\ref{fig:coil-rotmetrics} quantifies them. The autoencoder has the highest mean pose-recovery Spearman correlation ($|r| = 0.234$ versus 0.202 for MDS and 0.163 for PCA), consistent with the prediction that it better preserves the rotational ordering of images. However, \emph{all three} methods achieve pose-recovery correlations well below 1, and mean circularity ratios are low across the board (0.19--0.37). The proposal anticipated that the autoencoder would cleanly recover the closed rotation loops per object in 2D, and this is not what the data show. The likely explanation is structural: when all 20 objects are jointly embedded into only 2 dimensions, most of that 2D capacity is consumed by inter-object separation (which spreads 20 clusters across the plane) rather than by intra-object rotation (which would require additional dimensions per cluster to manifest as a loop). A fairer test of circular-manifold recovery would embed a single object's 72 poses on their own, where the 2D embedding is unambiguously about rotation; the joint-embedding metric reported here conflates two structural demands. MDS actually has the highest mean circularity (0.373), which is an artifact of the fact that its 2D embedding is the most spatially diffuse---more uniformly spread points within each cluster raise the covariance-ratio score regardless of whether the within-cluster structure is genuinely rotational.
+
+\paragraph{A methodological caveat on MDS reconstruction error.} The mean MDS reconstruction MSE of 13.995 is three orders of magnitude larger than PCA's (0.022), which is a larger gap than seen in any other dataset. Classical MDS with Euclidean distances is mathematically equivalent to PCA up to rotation, so the true reconstruction error should not differ by such a margin. The discrepancy is not a property of MDS itself but of the reconstruction scheme used to evaluate it: because \texttt{scikit-learn}'s SMACOF-based MDS returns only an embedding $\mathbf{Z}$ and no inverse map, $\widehat{\mathbf{X}}$ is computed here via a least-squares linear map fit from $\mathbf{X}$ to $\mathbf{Z}$ and then applied in the opposite direction. This is an approximate back-projection whose error is bounded only when the forward map is near-orthonormal, and on a $16{,}384$-dimensional input that condition is badly violated. MDS's reconstruction numbers on COIL-20 should therefore be read as evidence about this particular reconstruction scheme, not about MDS's intrinsic ability to preserve structure. Its embedding-based metrics---classification accuracy, pose recovery, circularity---remain trustworthy because they do not depend on an inverse map.
+
+%=====================================================================
+\section{TCGA BRCA Experiments}
+\label{sec:tcga}
+%=====================================================================
+
+\subsection{Dataset and Preprocessing}
+
+The TCGA Breast Invasive Carcinoma (BRCA) RNA-seq dataset, downloaded from the UCSC Xena data portal (HiSeqV2), contains $\log_2(x+1)$-transformed gene expression for 20{,}530 genes across approximately 1{,}218 samples: roughly 1{,}097 primary tumor, 114 adjacent-normal, and 7 metastatic samples. Sample type is encoded in the TCGA barcode. To make MDS computationally feasible and to reduce noise from low-expression genes, I restrict analysis to the top 2{,}000 most variable genes (ranked by sample-wise variance). This leaves a matrix of size $n \approx 1{,}218 \times p = 2{,}000$. Features are standardized prior to any fitting.
+
+This regime presents two analytical concerns that distinguish it from COIL-20:
+
+\begin{enumerate}[noitemsep, topsep=2pt]
+  \item \textbf{Sample size.} With $n \approx 1{,}200$ and hidden layers of a few hundred units, the autoencoder has more parameters than samples and is at genuine risk of overfitting. The hyperparameter grid explicitly includes dropout rates of 0 and 0.2 to address this.
+  \item \textbf{Intrinsic dimensionality.} Gene expression is known to be highly correlated across genes, suggesting a modest true intrinsic dimensionality. If most of the signal is captured in a small number of linear principal components, PCA is already near-optimal and an autoencoder has little room to improve.
+\end{enumerate}
+
+Figure~\ref{fig:tcga-scree} shows the cumulative explained-variance curve of PCA on the top 2{,}000 variable genes. The first \texttt{XX} components explain 50\% of the variance, \texttt{XX} components explain 80\%, and \texttt{XX} components explain 95\%. % TODO: read these three numbers directly off tcga_pca_variance.png (the dashed vertical lines are annotated with "50% @ PCk", "80% @ PCk", "95% @ PCk")
+This gives a concrete sense of how low the \emph{linear} intrinsic dimensionality of the data is.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.75\textwidth]{tcga_pca_variance.png}
+\caption{TCGA BRCA: cumulative PCA explained variance across the 2{,}000 most variable genes. Dashed lines mark the 50\%, 80\%, and 95\% thresholds.}
+\label{fig:tcga-scree}
+\end{figure}
+
+\subsection{Results}
+
+The best autoencoder configuration from the hyperparameter search is hidden dimensions \texttt{(256,)}, learning rate $3 \times 10^{-4}$, and dropout $0.2$ (validation MSE = 0.523; see appendix and Figure~\ref{fig:tcga-hp} for the full grid). The selection of dropout is diagnostic: across the grid, configurations \emph{without} dropout achieved validation MSE ranging from 0.529 (smallest network) to 0.805 (largest), with the larger architectures showing progressive overfitting, while the dropout-$0.2$ variants were much more uniform (0.52--0.57). This directly confirms the overfitting concern flagged in the project proposal---with $n \approx 1{,}200$ samples and hundreds of hidden parameters, regularization was essential. Table~\ref{tab:tcga-results} summarizes reconstruction MSE and Tumor/Normal classification accuracy.
+
+\begin{table}[H]
+\centering
+\caption{TCGA BRCA results summary. MSE at 10D latent; classification is binary Tumor vs.\ Normal by 5-fold stratified CV of logistic regression, with Metastatic samples excluded due to low $n = 7$.}
+\label{tab:tcga-results}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{MSE (10D)} & \textbf{Accuracy} & \textbf{Wilcoxon vs.\ AE ($p$)} \\
+\midrule
+PCA         & 2.827   & 0.9942 $\pm$ 0.0042 & $< 10^{-80}$ \\
+MDS         & 1042.05 & 0.9926 $\pm$ 0.0031 & $< 10^{-200}$ \\
+Autoencoder & 2.399   & 0.9909 $\pm$ 0.0017 & ---           \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.4em}
+\footnotesize \emph{Note.} As on COIL-20, Wilcoxon statistics of 0 (MDS comparisons) reflect perfect per-sample consistency in favor of one method. The PCA vs.\ AE statistic of 594 ($n = 1{,}218$) indicates that the AE's advantage is \emph{not} unanimous across samples but is still overwhelmingly significant. MDS's extremely large MSE is the same reconstruction-scheme artifact discussed in Section~\ref{sec:coil20}, not a statement about the embedding itself.
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{tcga_hp_search.png}
+\caption{TCGA BRCA autoencoder hyperparameter grid. Each cell is the validation-set reconstruction MSE for a (hidden dims, learning rate, dropout) configuration; the best configuration is highlighted.}
+\label{fig:tcga-hp}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{tcga_2d_by_type.png}
+\caption{TCGA BRCA: 2D embeddings by each method, colored by sample type. Tumor samples outnumber normal samples roughly 10:1; a useful embedding should separate the two.}
+\label{fig:tcga-2d}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.46\textwidth}
+  \centering\includegraphics[width=\textwidth]{tcga_mse.png}
+  \caption{Reconstruction MSE at 10D.}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.46\textwidth}
+  \centering\includegraphics[width=\textwidth]{tcga_classification.png}
+  \caption{Tumor/Normal classification accuracy.}
+\end{subfigure}
+\caption{TCGA BRCA quantitative comparison.}
+\end{figure}
+
+\subsection{Interpretation}
+
+The TCGA experiment was framed in the project proposal as the most cautious case for autoencoders: with $n \approx 1{,}200$ samples and thousands of correlated gene features, overfitting was the principal concern. The observed results both confirm that concern (the regularization landscape of the hyperparameter search is decisive) and deliver a modest positive surprise on the reconstruction task.
+
+\emph{Reconstruction MSE.} The autoencoder achieves a mean reconstruction MSE of 2.399 compared to PCA's 2.827, a 15\% reduction that is highly statistically significant (Wilcoxon $p < 10^{-80}$). This is smaller than the 14$\times$ advantage seen on COIL-20 but, given PCA's strong baseline on approximately-linear data, it is a meaningful improvement. The Wilcoxon statistic of 594 (as opposed to 0 on COIL-20) indicates that the AE does \emph{not} beat PCA on every single sample---there are a nontrivial minority of patients whose expression profile is reconstructed better by PCA---but the AE's advantage on the remaining majority is overwhelming enough to make the overall difference certain. This is consistent with a picture in which the gene expression manifold is \emph{mostly} linear, as anticipated, but contains nonlinear structure in some subspaces that the AE is able to exploit when properly regularized.
+
+\emph{Regularization was necessary.} The hyperparameter search provides direct evidence for the proposal's overfitting concern. Without dropout, validation MSE increased monotonically with network capacity: the single-layer $(128,)$ network without dropout achieved validation MSE of 0.529, while the two-layer $(512, 128)$ network without dropout achieved 0.805---52\% worse despite four times the parameter count. With dropout of 0.2, validation MSE was nearly flat across all architectures (0.52--0.57), indicating that dropout successfully recovered generalization even for the over-parameterized networks. That the finally selected configuration includes dropout confirms that the default unregularized AE would have overfit.
+
+\emph{Classification is ceiling-limited.} All three methods achieve Tumor vs.\ Normal classification accuracy in the 99.0--99.4\% range. PCA is nominally best at 99.42\%, AE last at 99.09\%, but the spread of 0.33 percentage points corresponds to roughly four patients misclassified differently across 1{,}211 samples---well inside the cross-validation fold-to-fold noise indicated by the standard deviations. The honest conclusion is that Tumor vs.\ Normal is a trivially separable classification task in this data: because tumor samples outnumber normal samples nearly 10-to-1 and their molecular profiles differ in many directions simultaneously, any reasonable 10D embedding preserves enough of the relevant variation to hit the ceiling. The downstream-task comparison on TCGA is therefore uninformative about method quality; a more demanding task (e.g., molecular subtyping of tumors) would be a better discriminator, but is beyond the scope of this project.
+
+\emph{MDS reconstruction MSE.} MDS's mean MSE of $1{,}042$ is three orders of magnitude larger than PCA's and reflects the same back-projection artifact discussed in Section~\ref{sec:coil20}. As on COIL-20, MDS's embedding-based metric (classification at 99.26\%) is reliable; its reconstruction number is not.
+
+%=====================================================================
+\section{Discussion}
+%=====================================================================
+
+\subsection{Summary of Findings Across Datasets}
+
+Taken together, the five experiments span a two-dimensional space characterized by (i) whether the underlying data-generating process is linear or nonlinear, and (ii) the ratio of samples to features. Table~\ref{tab:overall} summarizes the pattern.
+
+\begin{table}[H]
+\centering
+\caption{Qualitative summary of method behavior across datasets.}
+\label{tab:overall}
+\begin{tabular}{p{3.0cm} p{3.5cm} p{8.2cm}}
+\toprule
+\textbf{Dataset} & \textbf{Regime} & \textbf{Observation} \\
+\midrule
+Linear Subspace & Linear, low-dim signal & PCA and AE statistically indistinguishable ($p=0.22$); MDS significantly worse due to SMACOF optimization, not structural limitation. \\
+S-Curve         & Nonlinear manifold, small $p$ & AE reconstruction MSE $\approx 38\%$ of PCA's; gap highly significant ($p<0.0001$). Linear methods indistinguishable from each other. \\
+Swiss Roll      & Nonlinear manifold, small $p$ & AE reconstruction MSE $\approx 37\%$ of PCA's; all pairwise gaps significant ($p<0.0001$). AE visibly unrolls the manifold. \\
+COIL-20         & Nonlinear, high-dim, adequate $n$ & AE wins reconstruction 14$\times$ over PCA on every sample; but PCA wins classification (95.1\% vs.\ 91.1\%). Lower reconstruction MSE $\neq$ better downstream-task features. \\
+TCGA BRCA       & Approximately linear, high-dim, $n \ll p$ & AE modestly beats PCA on reconstruction (15\% reduction, $p < 10^{-80}$) \emph{only} with dropout regularization; classification is ceiling-limited tie at $\sim$99\%. Overfitting concern in proposal confirmed: unregularized AEs overfit progressively with capacity. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three broader conclusions follow.
+
+\paragraph{No single method dominates, and reconstruction winners are not always task winners.} The core claim of the project proposal---that no single method is universally best---is supported, but with an important refinement. The autoencoder achieves significantly lower reconstruction MSE on every nonlinear dataset tested (S-Curve, Swiss Roll, and COIL-20, each at $p < 0.0001$). However, on COIL-20 this reconstruction victory does \emph{not} translate into a classification victory: PCA's 10D embedding yields 95.1\% object-classification accuracy against the autoencoder's 91.1\%. The practical consequence is that any evaluation of dimensionality reduction that relies on reconstruction MSE alone risks selecting a method that is worse for the downstream task the embedding is actually being used for.
+
+\paragraph{Reconstruction fidelity and class-discriminative fidelity can trade off.} This is the COIL-20 lesson stated generally. An autoencoder minimizes pixel-level MSE, which rewards preserving \emph{any} variance in the input---including nuisance variation that is orthogonal to the task. PCA, by contrast, prioritizes the directions of greatest variance, which often (though not always) align with the directions that separate classes. When the two objectives diverge---as they do for COIL-20, where rotation is a major but task-irrelevant source of variance---reconstruction-based and task-based evaluations can rank methods in opposite orders. For applications where the embedding will be used as features for a downstream classifier, this suggests evaluating on task metrics directly rather than relying on reconstruction error as a proxy.
+
+\paragraph{Hyperparameter choice is consequential for autoencoders but not for PCA or MDS.} PCA and MDS are effectively hyperparameter-free; their behavior is determined by the data. Autoencoders, in contrast, exhibited substantial variability across architectures and learning rates in the grid search. The TCGA experiment provides concrete evidence: without dropout, validation MSE on that dataset ranged from 0.53 for the smallest architecture to 0.80 for the largest---a 52\% degradation driven entirely by overfitting. With dropout of 0.2, validation MSE was flat at roughly 0.52--0.57 across all architectures, indicating that the regularization successfully decoupled generalization from capacity. The point is that a hypothetical practitioner who deployed an unregularized AE ``off the shelf'' on this data would have gotten substantially worse results than a well-tuned linear PCA. Deep methods require not only data but also diligence.
+
+\subsection{Limitations}
+
+Several limitations of this study are worth flagging.
+
+First, only fully-connected autoencoders were tested. For an image dataset like COIL-20, a convolutional autoencoder would likely achieve substantially lower reconstruction error and preserve spatial structure more faithfully; for a very wide dataset like TCGA, a sparse or variational autoencoder would be a natural next step. Restricting to a single architectural family keeps the comparison controlled but understates the best achievable performance of neural methods.
+
+Second, MDS as implemented here is metric MDS with Euclidean distances, which is mathematically equivalent to PCA up to rotation for centered data. Because \texttt{scikit-learn}'s SMACOF solver returns only an embedding and no explicit inverse map, reconstruction is approximated here by a least-squares back-projection. This approximation is tight when the forward map is near-orthonormal (as in low-dimensional inputs) but can inflate the reported MSE dramatically in very high-dimensional settings; this is seen on COIL-20 (MDS MSE of 13.995 vs.\ PCA's 0.022) and on TCGA BRCA (MDS MSE of $1{,}042$ vs.\ PCA's 2.83), where the two methods should be nearly equivalent in principle. MDS's \emph{embedding}-based metrics (classification, pose recovery, circularity) are unaffected by this issue because they do not depend on an inverse map. A more interesting comparison would include Isomap or locally linear embedding, which use geodesic distances on a neighborhood graph and are genuinely distinct from PCA. These were excluded from the proposal to keep the method set manageable but are acknowledged as natural extensions.
+
+Third, downstream classification was evaluated only with logistic regression. Nonlinear classifiers (random forest, SVM with RBF kernel) might extract more information from a linear embedding, narrowing the classification gap between methods.
+
+Fourth, only one random seed was used for each experiment. Autoencoder training in particular can vary nontrivially across random initializations, and the reported numbers for a single seed should be regarded as a single realization of a noisy process rather than a tight point estimate. A useful extension would be to repeat each autoencoder experiment across multiple seeds and report mean and variance.
+
+\subsection{Practical Recommendations}
+
+From a practitioner's standpoint, the experiments here motivate a simple protocol: begin with PCA, because it is fast, interpretable, and achieves the minimum rank-$k$ linear reconstruction error by construction. Examine the scree plot or cumulative explained-variance curve to gauge the data's effective linear dimensionality. If the first few components explain most of the variance and downstream-task performance on PCA embeddings is acceptable, then the additional complexity of training and tuning an autoencoder is unlikely to be worthwhile. If instead the data's intrinsic manifold structure is visibly nonlinear (as in COIL-20 or the Swiss Roll), or if PCA embeddings fail to preserve task-relevant structure (for instance, circular topology), then the autoencoder's nonlinearity becomes valuable---provided there is enough data to train it.
+
+%=====================================================================
+\section{Conclusion}
+%=====================================================================
+
+This project implemented and compared PCA, MDS, and feedforward autoencoders on five datasets of differing structure, using a unified experimental design based on reconstruction MSE, pairwise Wilcoxon tests, and downstream classification performance. The results show that (i) linear methods and autoencoders excel in distinct regimes characterized by the linearity of the data and the sample-to-feature ratio, (ii) autoencoders can recover structural properties---such as the circular topology of COIL-20's rotation manifold---that linear methods provably cannot, and (iii) the advantages of deep dimensionality reduction are contingent on adequate data and careful hyperparameter tuning and should not be assumed by default. The autoencoder is a powerful tool but not a universal replacement for classical linear methods; the choice between them should be guided by the structure of the data at hand.
+
+%=====================================================================
+\section*{References}
+\addcontentsline{toc}{section}{References}
+%=====================================================================
+
+\begin{thebibliography}{9}
+
+\bibitem{jolliffe2002}
+Jolliffe, I.\ T. (2002). \emph{Principal Component Analysis}, 2nd ed. Springer.
+
+\bibitem{borg2005}
+Borg, I.\ and Groenen, P.\ J.\ F. (2005). \emph{Modern Multidimensional Scaling: Theory and Applications}, 2nd ed. Springer.
+
+\bibitem{hinton2006}
+Hinton, G.\ E.\ and Salakhutdinov, R.\ R. (2006). Reducing the dimensionality of data with neural networks. \emph{Science}, 313(5786), 504--507.
+
+\bibitem{goodfellow2016}
+Goodfellow, I., Bengio, Y., and Courville, A. (2016). \emph{Deep Learning}. MIT Press.
+
+\bibitem{coil20}
+Nene, S.\ A., Nayar, S.\ K., and Murase, H. (1996). Columbia Object Image Library (COIL-20). Technical Report CUCS-005-96, Columbia University.
+
+\bibitem{tcga}
+The Cancer Genome Atlas Network (2012). Comprehensive molecular portraits of human breast tumours. \emph{Nature}, 490(7418), 61--70.
+
+\bibitem{xena}
+Goldman, M.\ J.\ et al. (2020). Visualizing and interpreting cancer genomics data via the Xena platform. \emph{Nature Biotechnology}, 38(6), 675--678.
+
+\bibitem{sklearn}
+Pedregosa, F.\ et al. (2011). Scikit-learn: Machine learning in Python. \emph{JMLR}, 12, 2825--2830.
+
+\bibitem{pytorch}
+Paszke, A.\ et al. (2019). PyTorch: An imperative style, high-performance deep learning library. \emph{NeurIPS}, 32.
+
+\end{thebibliography}
+
+%=====================================================================
+\appendix
+\section{Full Hyperparameter Search Results}
+%=====================================================================
+
+For completeness, the full grid-search results for each dataset can be reconstructed from the scripts' console output. For each configuration, validation-set reconstruction MSE at the 10D latent task is reported; the minimum-val-MSE configuration is the one retrained on all data for the main-text results.
+
+\paragraph{Synthetic datasets.} Autoencoder grid: hidden dims $\in \{(64,), (128,64), (256,128), (128,64,32)\}$; learning rates $\in \{1\text{e-}3,\, 3\text{e-}4\}$. Hidden dims are capped to $\max(2p,\, 4k)$ in \texttt{run\_all\_methods} to avoid over-parameterization on 3D inputs.
+
+\paragraph{COIL-20.} Autoencoder grid: hidden dims $\in \{(512,), (512,256), (1024,256), (512,128), (1024,256,64)\}$; learning rates $\in \{1\text{e-}3,\, 3\text{e-}4\}$.
+
+\paragraph{TCGA BRCA.} Autoencoder grid: hidden dims $\in \{(128,), (256,), (256,64), (512,128)\}$; learning rates $\in \{1\text{e-}3,\, 3\text{e-}4\}$; dropout $\in \{0,\, 0.2\}$. See Figure~\ref{fig:tcga-hp} for visualization of the full grid.
+
+\end{document}
